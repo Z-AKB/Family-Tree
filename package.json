@@ -1,0 +1,19 @@
+{
+  "name": "family-tree-app",
+  "version": "1.0.0",
+  "description": "Family tree website: viewer and admin frontend with an Express + SQLite backend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test",
+    "check:responsive": "node tools/responsive-check.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^12.11.1",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.0.2",
+    "nodemailer": "^10.1.2"
+  }
+}

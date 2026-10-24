@@ -1,0 +1,5 @@
+node_modules
+family.db*
+uploads
+test
+.env

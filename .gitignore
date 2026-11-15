@@ -2,3 +2,11 @@ node_modules
 family.db*
 uploads
 .env
+
+# Audit / verification artifacts (generated locally; evidence only, not project source)
+responsive-shots/
+e2e-shots/
+perf-report.json
+perf-output.txt
+responsive-final-2.txt
+final-test-output.txt

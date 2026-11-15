@@ -132,6 +132,18 @@ app.use((_req, res, next) => { // basic security headers; scripts and styles onl
 const AUTH_WINDOW = 15 * 60 * 1000;
 const AUTH_LIMIT = Math.max(1, Math.floor(Number(process.env.AUTH_LIMIT) || 20));
 const authHits = new Map();
+
+// Maximum size for a JSON backup restore request body. The global JSON parser stays small so
+// ordinary API requests cannot submit huge payloads; the restore endpoint raises its own limit
+// via a route-specific middleware because backup files can legitimately be several megabytes.
+// The global parser must not run for the restore path: Express parsers consume the stream that
+// the route-specific parser needs, so a 1 MB global limit would reject a valid 2 MB backup.
+const MAX_BACKUP_SIZE = 64 * 1024 * 1024; // 64 MiB
+const RESTORE_PATH = '/api/trees/restore';
+const MAX_BACKUP_PEOPLE = 50000;
+const MAX_BACKUP_MARRIAGES = 50000;
+const MAX_BACKUP_ATTACHMENTS = 50000;
+const MAX_BACKUP_MEDIA = 2000;
 const authKey = (req, scope) => req.ip + ':' + scope;
 const recentHits = key => (authHits.get(key) || []).filter(t => Date.now() - t < AUTH_WINDOW);
 const limited = (res, key) => {
@@ -154,7 +166,8 @@ const clearAuthFailures = (req, scope) => authHits.delete(authKey(req, scope));
 setInterval(() => authHits.clear(), 3600e3).unref();
 app.use('/api/auth/register', authRequestGuard('register'));
 app.use('/api/auth/forgot', authRequestGuard('forgot'));
-app.use(express.json({ limit: '200kb' }));
+const globalJson = express.json({ limit: '1mb' });
+app.use((req, res, next) => req.path === RESTORE_PATH ? next() : globalJson(req, res, next));
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/api/config', (_req, res) => {
   const demoEnabled = DEMO_ENABLED && !!db.prepare('SELECT id FROM users WHERE email=?').get(DEMO_EMAIL);
@@ -656,14 +669,50 @@ app.get('/api/trees/:id/export.json', need, (req, res) => {
 });
 
 // Validate a backup without changing anything. Used both by the preview and by the restore itself.
+// Parent links are checked for loops with an iterative topological pass: a recursive walk could
+// exhaust the stack on a crafted backup, and 50,000 people is a legitimate upper bound.
+const backupParentCycleError = (people, marriages) => {
+  const byMarriage = new Map();
+  for (const m of marriages) if (m && m.id != null) byMarriage.set(String(m.id), m);
+  const parentsOf = new Map(people.map(p => [String(p.id), []]));
+  for (const p of people) {
+    if (!p || p.id == null || p.parent_marriage_id == null) continue;
+    const m = byMarriage.get(String(p.parent_marriage_id));
+    if (!m) continue;
+    if (String(m.a_id) === String(p.id) || String(m.b_id) === String(p.id)) return 'A person in the backup is recorded as their own parent.';
+    for (const parent of [m.a_id, m.b_id]) if (parent != null && parentsOf.has(String(parent))) parentsOf.get(String(p.id)).push(String(parent));
+  }
+  const children = new Map([...parentsOf.keys()].map(id => [id, []]));
+  const remaining = new Map();
+  for (const [id, parents] of parentsOf) {
+    remaining.set(id, parents.length);
+    for (const parent of parents) children.get(parent).push(id);
+  }
+  const ready = [...remaining].filter(([, n]) => n === 0).map(([id]) => id);
+  let visited = 0;
+  for (let i = 0; i < ready.length; i++) {
+    visited++;
+    for (const child of children.get(ready[i]) || []) {
+      const left = remaining.get(child) - 1;
+      remaining.set(child, left);
+      if (left === 0) ready.push(child);
+    }
+  }
+  return visited === parentsOf.size ? null : 'That backup contains a parent-child loop.';
+};
 const inspectBackup = b => {
   const errors = [], warnings = [];
   if (!b || typeof b !== 'object' || Array.isArray(b)) return { errors: ['That file is not a Family Tree backup.'], warnings, counts: {} };
   const people = Array.isArray(b.people) ? b.people : null, marriages = Array.isArray(b.marriages) ? b.marriages : null;
   if (!people || !marriages) return { errors: ['That backup is missing people or relationships.'], warnings, counts: {} };
   if (!people.length) errors.push('That backup does not contain any people.');
-  if (people.length > 50000 || marriages.length > 50000) errors.push('That backup is too large to restore.');
+  if (people.length > MAX_BACKUP_PEOPLE || marriages.length > MAX_BACKUP_MARRIAGES)
+    return { errors: ['That backup is too large to restore.'], warnings, counts: { people: people.length, marriages: marriages.length } };
   const media = Array.isArray(b.media) ? b.media : [], attachments = Array.isArray(b.attachments) ? b.attachments : [];
+  const members = Array.isArray(b.members) ? b.members.filter(x => x && x.email && ['editor', 'viewer'].includes(x.role)) : [];
+  const counts = { people: people.length, marriages: marriages.length, attachments: attachments.length, media: 0, members: members.length, history: Array.isArray(b.history) ? b.history.length : 0 };
+  if (attachments.length > MAX_BACKUP_ATTACHMENTS) errors.push('That backup contains too many records to restore.');
+  if (media.length > MAX_BACKUP_MEDIA) errors.push('That backup contains too many media files to restore.');
   const pids = new Set(), mids = new Set();
   for (const p of people) {
     if (!p || typeof p !== 'object' || p.id == null || pids.has(String(p.id))) { errors.push('Every person in the backup needs a unique id.'); continue; }
@@ -677,9 +726,11 @@ const inspectBackup = b => {
     const a = m.a_id, bb = m.b_id;
     if (a == null && bb == null) errors.push('A relationship in the backup has no people.');
     else if (a != null && bb != null && String(a) === String(bb)) errors.push('A relationship in the backup links someone to themselves.');
-    for (const id of [a, bb]) if (id != null && !pids.has(String(id))) warnings.push('A relationship refers to someone who is not in the backup and was skipped.');
+    for (const id of [a, bb]) if (id != null && !pids.has(String(id))) errors.push('A relationship refers to someone who is not in the backup.');
   }
-  for (const p of people) if (p && p.parent_marriage_id != null && !mids.has(String(p.parent_marriage_id))) warnings.push(`The parents of “${String(p.name || 'a person').slice(0, 60)}” are not in the backup.`);
+  for (const p of people) if (p && p.parent_marriage_id != null && !mids.has(String(p.parent_marriage_id)))
+    errors.push(`The parents recorded for “${String(p.name || 'a person').slice(0, 60)}” are not in the backup.`);
+  const cycle = backupParentCycleError(people, marriages); if (cycle) errors.push(cycle);
   let mediaCount = 0;
   for (const m of media) {
     if (!m || typeof m.name !== 'string' || typeof m.data !== 'string') { warnings.push('A media file in the backup was not valid and was skipped.'); continue; }
@@ -689,9 +740,8 @@ const inspectBackup = b => {
     mediaCount++;
   }
   for (const a of attachments) if (!a || !pids.has(String(a.person_id))) warnings.push('An attachment refers to someone who is not in the backup and was skipped.');
-  const members = Array.isArray(b.members) ? b.members.filter(x => x && x.email && ['editor', 'viewer'].includes(x.role)) : [];
-  const counts = { people: people.length, marriages: marriages.length, attachments: attachments.length, media: mediaCount, members: members.length, history: Array.isArray(b.history) ? b.history.length : 0 };
-  return { errors, warnings: [...new Set(warnings)], counts };
+  counts.media = mediaCount;
+  return { errors: [...new Set(errors)].slice(0, 200), warnings: [...new Set(warnings)].slice(0, 200), counts };
 };
 const restoreBackup = (uid, b, counts) => {
   const people = b.people, marriages = b.marriages, attachments = Array.isArray(b.attachments) ? b.attachments : [];
@@ -702,7 +752,9 @@ const restoreBackup = (uid, b, counts) => {
   const wrote = [], mediaMap = new Map(), pMap = new Map(), mMap = new Map(), warnings = [...counts.warnings];
   try {
     // Files are written first under generated names; the user-supplied path is never used directly.
-    for (const m of media) {
+    for (const m of media.slice(0, MAX_BACKUP_MEDIA)) {
+      if (!m || typeof m.name !== 'string' || typeof m.data !== 'string') continue;
+      if (m.data.length > Math.ceil(8 * 1024 * 1024 / 3) * 4) continue;
       const decoded = Buffer.from(m.data, 'base64'), type = detectMediaType(decoded.subarray(0, 16));
       if (!type || decoded.length > 8 * 1024 * 1024) continue;
       const filename = Date.now() + '-' + crypto.randomBytes(8).toString('hex') + (MEDIA_TYPES[type].exts[0] || '.bin');
@@ -758,6 +810,9 @@ const restoreBackup = (uid, b, counts) => {
         if (!h || !h.action) continue;
         db.prepare('INSERT INTO audit(tree_id,user_id,action,detail,at) VALUES(?,?,?,?,?)').run(newTid, u ? u.id : null, String(h.action).slice(0, 200), h.detail ? String(h.detail).slice(0, 1000) : null, h.at ? String(h.at).slice(0, 40) : new Date().toISOString());
       }
+      // Last line of defence: never commit a restored tree with a self-parent or a parent-child loop.
+      const bad = relationshipIntegrityError(newTid);
+      if (bad) { const e = new Error(bad); e.safeMessage = true; throw e; }
       log(newTid, uid, 'restored a backup', `${people.length} people, ${marriages.length} relationships`);
       return newTid;
     })();
@@ -767,11 +822,23 @@ const restoreBackup = (uid, b, counts) => {
     throw e;
   }
 };
-const uploadBackup = multer({ storage: multer.memoryStorage(), limits: { fileSize: 64 * 1024 * 1024 } });
-app.post('/api/trees/restore', need, uploadBackup.single('file'), express.json({ limit: '64mb' }), express.text({ type: ['text/plain', 'application/octet-stream'], limit: '64mb' }), (req, res) => {
+const uploadBackup = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_BACKUP_SIZE } });
+// A valid backup is only a handful of levels deep. Walk the parsed body iteratively so a crafted
+// payload cannot force recursive validation code to exhaust the stack.
+const nestedTooDeep = (value, limit = 64) => {
+  const stack = [[value, 1]];
+  while (stack.length) {
+    const [node, depth] = stack.pop();
+    if (depth > limit) return true;
+    if (node && typeof node === 'object') for (const key in node) stack.push([node[key], depth + 1]);
+  }
+  return false;
+};
+app.post('/api/trees/restore', need, uploadBackup.single('file'), express.json({ limit: MAX_BACKUP_SIZE }), express.text({ type: ['text/plain', 'application/octet-stream'], limit: MAX_BACKUP_SIZE }), (req, res) => {
   let raw = req.file ? req.file.buffer.toString('utf8') : req.body;
   if (Buffer.isBuffer(raw)) raw = raw.toString('utf8');
   if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch { return fail(res, 400, 'That file is not valid JSON.'); } }
+  if (nestedTooDeep(raw)) return fail(res, 400, 'That backup is nested too deeply.');
   const preview = req.query.preview === '1' || (raw && raw.mode === 'preview') || req.body && req.body.mode === 'preview';
   const info = inspectBackup(raw);
   if (info.errors.length) return res.status(400).json({ valid: false, errors: info.errors.slice(0, 20), warnings: info.warnings, counts: info.counts });
@@ -1627,6 +1694,14 @@ app.post('/api/people/:id/photo', need, (req, res, next) => { if (!ownPerson(req
   if (old && old.photo) removeUploadIfUnused(old.photo);
   res.json({ photo: '/uploads/' + req.file.filename });
 });
+app.delete('/api/people/:id/photo', need, (req, res) => {
+  const p = ownPerson(req, res); if (!p) return;
+  if (p.photo) {
+    db.prepare('UPDATE people SET photo=NULL WHERE id=?').run(p.id);
+    removeUploadIfUnused(p.photo);
+  }
+  res.json({ photo: null });
+});
 app.get('/api/people/:id/photo', (req, res) => {
   const p = q('SELECT * FROM people WHERE id=?', req.params.id);
   const t = p && q('SELECT * FROM trees WHERE id=?', p.tree_id);
@@ -1643,9 +1718,12 @@ const errorHandler = (err, req, res, next) => {
   if (res.headersSent) return next(err);
   if (err && err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON in the request body.' });
   if (err && err.type === 'entity.too.large') return res.status(413).json({ error: 'Request body is too large.' });
+  if (err instanceof RangeError) return res.status(400).json({ error: 'The request body is too deeply nested or malformed.' });
   if (err instanceof multer.MulterError) {
     if (err.code !== 'LIMIT_FILE_SIZE') return res.status(400).json({ error: 'That upload could not be accepted.' });
     const attachments = String(req.originalUrl || '').includes('/attachments');
+    const backup = String(req.originalUrl || '').includes('/trees/restore');
+    if (backup) return res.status(413).json({ error: 'That backup is too large (maximum 64 MB).' });
     return res.status(400).json({ error: attachments ? 'That file is too large (maximum 5 MB).' : 'That image is too large (maximum 3 MB).' });
   }
   if (err && err.expose === true && Number(err.status) >= 400 && Number(err.status) < 500) {

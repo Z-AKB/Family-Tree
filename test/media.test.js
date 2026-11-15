@@ -101,6 +101,37 @@ test('profile photos require a real image and are served only to people who may 
   assert.equal((await media(`/people/${tree.root.id}/photo`, token)).type, 'image/jpeg');
 });
 
+test('profile photos can be replaced and removed, deleting only the unused file', async () => {
+  const owner = await newUser();
+  const tree = await newTree(owner, { name: 'Photo Lifecycle', gender: 'Other', dob: '1970' });
+  const pid = tree.root.id;
+  const first = await upload(`/people/${pid}/photo`, owner, 'photo', 'first.png', 'image/png', PNG);
+  assert.equal(first.status, 200);
+  assert.ok(exists(first.body.photo), 'first photo stored');
+  const firstPath = upPath(first.body.photo);
+
+  const second = await upload(`/people/${pid}/photo`, owner, 'photo', 'second.png', 'image/png', PNG);
+  assert.equal(second.status, 200);
+  assert.ok(exists(second.body.photo), 'replacement photo stored');
+  assert.equal(fs.existsSync(firstPath), false, 'replaced file was deleted');
+
+  const stranger = await newUser();
+  assert.equal((await call(`/people/${pid}/photo`, { method: 'DELETE', token: stranger })).status, 403, 'other users cannot remove it');
+  assert.equal((await call(`/people/${pid}/photo`, { method: 'DELETE' })).status, 401, 'anonymous users cannot remove it');
+  assert.ok(exists(second.body.photo), 'refused deletes leave the file in place');
+
+  const removed = await call(`/people/${pid}/photo`, { method: 'DELETE', token: owner });
+  assert.equal(removed.status, 200);
+  assert.equal(removed.body.photo, null);
+  assert.equal(fs.existsSync(upPath(second.body.photo)), false, 'removed file was deleted');
+  const after = await call(`/trees/${tree.id}`, { token: owner });
+  assert.equal(after.body.people.find(p => p.id === pid).photo, null);
+
+  const again = await call(`/people/${pid}/photo`, { method: 'DELETE', token: owner });
+  assert.equal(again.status, 200, 'removing an absent photo is idempotent');
+  assert.equal(again.body.photo, null);
+});
+
 test('attachments accept images and PDFs, reject disguised files, and honor share-link privacy', async () => {
   const token = await newUser();
   const tree = await newTree(token, { name: 'Public Root', gender: 'Other', dob: '1900', dod: '1980' });

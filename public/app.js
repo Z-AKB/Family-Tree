@@ -365,6 +365,7 @@ function personView(id){
       <div class="profile-quick-actions">
         <a class="btn" href="#/t/${tid}/ped/${p.id}">See ancestors</a>
         <button class="btn" data-print type="button">Print</button>
+        ${S.canEdit&&p.photo?'<button class="btn" id="rmphoto" type="button">Remove photo</button>':''}
         ${S.canEdit?`<a class="btn pri" href="#/t/${tid}/edit/${p.id}">Edit details</a>`:''}
       </div>
     </section>
@@ -449,6 +450,7 @@ function personView(id){
   }).catch(()=>{});
 
   const ph=$('#ph');if(ph)ph.onchange=async()=>{const fd=new FormData(),vid=viewId;fd.append('photo',ph.files[0]);try{await api('/people/'+p.id+'/photo','POST',fd);if(vid!==viewId)return;clearMedia();await load(tid);if(vid!==viewId)return;await ensure(id);if(vid===viewId)personView(id)}catch(x){alert(x.message)}};
+  const rp=$('#rmphoto');if(rp)rp.onclick=async()=>{if(!confirm('Remove the profile photo?'))return;const vid=viewId;try{await api('/people/'+p.id+'/photo','DELETE');if(vid!==viewId)return;clearMedia();await load(tid);if(vid!==viewId)return;await ensure(id);if(vid===viewId)personView(id)}catch(x){alert(x.message)}};
   const rm=$('#rm');if(rm)rm.onclick=async()=>{if(confirm('Remove '+p.name+' from the tree?')){const vid=viewId;try{await api('/people/'+p.id,'DELETE');if(vid!==viewId)return;await load(tid);if(vid===viewId)location.hash='#/t/'+tid}catch(x){alert(x.message)}}};
 }
 
@@ -743,7 +745,7 @@ function chartShell(title,body,W,H,extra=''){
     <div class="chartwrap" id="cw" tabindex="0"></div>
   </div>`;
   const cw=$('#cw'),fit=()=>Math.min(1,(cw.clientWidth-16)/W),draw=()=>{cw.innerHTML=`<svg class="chart" width="${W*zoom}" height="${H*zoom}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${safe}">${body}</svg>`};
-  zoom=cw.clientWidth<700?.8:Math.max(.55,fit());draw();cw.scrollLeft=(W*zoom-cw.clientWidth)/2;
+  zoom=cw.clientWidth<700?.8:Math.max(.57,fit());draw();cw.scrollLeft=(W*zoom-cw.clientWidth)/2; // .57 keeps 78px chart nodes >=44px touch targets
   document.querySelectorAll('[data-z]').forEach(b=>b.onclick=()=>{const k=b.dataset.z;zoom=k==='fit'?fit():Math.max(.3,Math.min(2,zoom*(k==='+'?1.25:.8)));draw();if(k==='fit')cw.scrollLeft=0});
   let drag=null;cw.onpointerdown=e=>{if(e.pointerType!=='mouse'||e.target.closest('a'))return;drag=[e.clientX,e.clientY,cw.scrollLeft,cw.scrollTop];cw.setPointerCapture(e.pointerId)};
   cw.onpointermove=e=>{if(drag){cw.scrollLeft=drag[2]-(e.clientX-drag[0]);cw.scrollTop=drag[3]-(e.clientY-drag[1])}};cw.onpointerup=()=>drag=null;

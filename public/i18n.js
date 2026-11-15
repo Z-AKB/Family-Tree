@@ -16,15 +16,19 @@
     return s;
   }
   var orig = new WeakMap(), oattr = new WeakMap();
+  // Names, notes, titles and other things people type must never be translated, even if they happen
+  // to match an interface phrase. Screens mark those areas with data-i18n-skip.
+  function skip(el) { return !!(el && el.closest && el.closest('[data-i18n-skip],script,style,textarea,#lg')); }
   function apply() {
     document.documentElement.lang = lang;
     var w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT), n;
     while ((n = w.nextNode())) {
-      var p = n.parentNode; if (!p || /^(SCRIPT|STYLE|TEXTAREA)$/.test(p.nodeName) || (p.closest && p.closest('#lg'))) continue;
+      var p = n.parentNode; if (!p || skip(p)) continue;
       var rec = orig.get(n), base = rec && n.data === rec.out ? rec.src : n.data, out = lang === 'en' ? base : tr(base); // new text from the app counts as English
       if (out !== n.data) { orig.set(n, { src: base, out: out }); n.data = out; } else if (rec && out === base) orig.delete(n);
     }
     document.querySelectorAll('[placeholder],[aria-label],[title]').forEach(function (el) {
+      if (skip(el)) return;
       var rec = oattr.get(el) || {};
       ATTR.forEach(function (a) {
         if (!el.hasAttribute(a)) return;

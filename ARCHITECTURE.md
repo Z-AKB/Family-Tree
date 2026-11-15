@@ -6,7 +6,7 @@ Browser (public/index.html, hash-routed single page)
 Express API (server.js)  -- auth, roles, privacy filter, audit log, GEDCOM export
    |
 SQLite (better-sqlite3)  -- users, trees, people, marriages, members, audit
-Disk (uploads/)          -- profile photos
+Disk (uploads/)          -- profile photos and attachments
 ```
 
 ## Decisions and what they are based on
@@ -35,13 +35,21 @@ Disk (uploads/)          -- profile photos
 | Merge moves relationships instead of deleting them | A repeat can hold a spouse, children or photos; two records for the same couple collapse into one | https://github.com/thisisankit/f-tree |
 | Sessions carry a version that changes with the password | Changing or resetting a password signs out every other device | OWASP session guidance |
 | Reset links are random, stored only as a hash, expire in one hour, and work once; the page never reveals whether an email has an account | Standard account-recovery hardening | OWASP forgot-password guidance |
+| Changing a password also deletes every outstanding reset link in the same transaction | A stolen old reset link must not reopen an account after the password changes | OWASP forgot-password guidance |
+| Demo data is seeded only outside production, or when `SEED_DEMO=1`; the login hint appears only when the demo account actually exists | Production deployments should not advertise or create known credentials | n/a |
+| JWTs are signed and verified with HS256 only; email, name, and password inputs are normalized and length-checked | Prevents algorithm confusion, duplicate/case-variant accounts, and oversized bcrypt inputs | https://cheatsheetseries.owasp.org/cheatsheets/JSON_Web_Token_for_Java_Cheat_Sheet.html |
+| Sign-in, reset, and password-change limits count failures by direct socket IP, not by email or successful requests | An attacker cannot dodge the limit by changing the email; normal users are not penalized | OWASP authentication guidance |
 | Translations match the English text the app draws, from one data file | Adding a language is one more entry per row, and a test fails if any phrase is missing | n/a |
+| Uploads are checked by magic bytes and must match their extension and declared type | A renamed executable or a file with a spoofed MIME type is rejected before it is stored | https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html |
+| Stored files are served only through permission-checked routes, and the browser fetches them with the session token as blob URLs | The uploads folder is never public, while shared links still follow the same living-person rules | OWASP file upload guidance (link above) |
+| Files are removed only after a successful database change, and only when no remaining row references them | Deleting or merging a person does not leave orphans or break a photo shared by two records | n/a |
 
 ## Operations
-- Tests: `npm test` covers sign-in, roles, privacy, dates, loading, search, and GEDCOM round trips.
+- Tests: `npm test` covers sign-in, validation, rate limits, reset invalidation, error handling, roles, privacy, dates, loading, search, browser routes, and GEDCOM round trips.
 - Layout: `tools/responsive-check.js` loads every page at five screen sizes in every design and flags sideways overflow and small touch targets.
 - Designs: each design is a block of CSS variables (colours, fonts, corner radii) on `:root[data-theme]`, so adding one is about 15 lines. `theme.js` applies the saved choice before the page paints.
-- Security: security headers, sign-in rate limit, 200 KB JSON limit, production refuses the default secret.
+- Security: security headers, HS256-pinned JWTs, failure-based auth rate limits, 200 KB JSON limit, magic-byte upload checks, permission-checked media routes, safe error responses, demo seeding disabled in production by default, and production refuses to start without `JWT_SECRET`.
+- Proxy: Express `trust proxy` is off, so `X-Forwarded-For` is not trusted. A reverse proxy makes all clients share its IP for rate limiting; tune `AUTH_LIMIT` accordingly.
 - Deployment: Dockerfile with a `/data` volume. SQLite suits one server; move to PostgreSQL to run several.
 
 ## Not built yet (known next steps)

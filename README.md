@@ -3,17 +3,17 @@
 Express + SQLite backend with a vanilla JS frontend served from `public/`.
 
 ## Run
-    npm test             # 8 automated API tests
+    npm test             # API and browser tests
     npm run check:responsive   # optional layout check, see tools/responsive-check.js
     npm install
     npm start            # http://localhost:3000
-Demo login: demo@family.test / demo1234 (seeded with the Whitmore family on first run).
+Demo login (development only): demo@family.test / demo1234. The Whitmore family is seeded on first run outside production, or when `SEED_DEMO=1`.
 Set `JWT_SECRET` in production. The database is `family.db`; photos are saved in `uploads/`.
 
 ## Features
 - Relationship types: married, partners, divorced or separated (with start and end years), and adopted, step or foster children. They carry through GEDCOM and the relationship finder ("stepson").
 - Tidy up: finds likely duplicate people and merges them (relationships, children, photos and notes move across), and flags impossible dates such as a mother who would have been 6, or people not connected to the tree.
-- Sources, documents and a photo album for each person (images or PDF up to 5 MB, or a web link). Living people's files stay hidden from visitors. A button opens a FamilySearch record search for the person in a new tab.
+- Sources, documents and a photo album for each person (images or PDF up to 5 MB, or a web link). Living people's files stay hidden from visitors. A button opens a FamilySearch record search for the person in a new tab. Uploads are checked by their contents (PNG, JPEG, GIF, WEBP or PDF), not only by the file name.
 - Accounts: forgot-password by email, change password (signs out other devices), change name, delete account.
 - Languages: English, French, Spanish and Hausa, chosen from the header. Hausa is a first draft and needs review by a native speaker. Names, notes and anything people type are never translated.
 - Charts: a connected family chart (zoom, drag, choose how many generations, print) and an ancestors chart for any person.
@@ -25,7 +25,7 @@ Set `JWT_SECRET` in production. The database is `family.db`; photos are saved in
 - Five designs to choose from with the Design button: Sunny, Heritage, Midnight, Blossom and Clean (high contrast). The choice is remembered on that device, and first-time visitors on a dark-mode device get Midnight.
 - Works on phones, tablets and desktops (checked at 360, 390, 768, 1280 and 1920 px wide in all five designs). Buttons are at least 44px tall, and the menu becomes a swipeable row on phones.
 - Search for a family member by name from any tree page.
-- Hardened: security headers, a limit on sign-in attempts, no inline scripts, and the server refuses to start in production without `JWT_SECRET`.
+- Hardened: security headers, validation for email/name/password inputs, HS256-pinned JWTs, failed-attempt rate limits, no inline scripts, safe error messages, and the server refuses to start in production without `JWT_SECRET`. Demo accounts are not seeded in production unless `SEED_DEMO=1`, and the demo hint only appears when the demo account actually exists.
 - Viewer: tree with multiple spouse branches, offspring toggle, grandchildren page, full person pages. Trees can be shared by link (`#/t/<id>`), read-only for visitors.
 - Owner: create and rename trees, add spouses and children, edit details, upload photos, remove people.
 - Privacy: trees are private by default. Shared links hide full birth dates and photos of living people.
@@ -38,12 +38,13 @@ Set `JWT_SECRET` in production. The database is `family.db`; photos are saved in
 ## API
 | Method | Path | Purpose |
 |---|---|---|
+| GET | /api/config | Public flags (`demoEnabled` only) |
 | POST | /api/auth/register, /api/auth/login | Accounts (returns JWT) |
 | GET/POST | /api/trees | List mine / create a tree with its first person |
 | GET/PATCH/DELETE | /api/trees/:id | Read (public) / rename / delete |
 | POST | /api/trees/:id/people | Add a person: `spouse_of` (+ `year`) or `parent_marriage_id` |
 | PUT/DELETE | /api/people/:id | Edit / remove (blocked if they have children) |
-| POST | /api/people/:id/photo | Upload `photo` (multipart, 3 MB max) |
+| POST/GET | /api/people/:id/photo | Upload `photo` (multipart, 3 MB max) / read it with the caller's permissions |
 | GET | /api/people/:id/relatives | Ancestors and descendants (recursive CTE, `?depth=`) |
 | GET/POST/DELETE | /api/trees/:id/members | Invite, list, remove collaborators (owner) |
 | GET | /api/trees/:id/history | Change history (owner, editor) |
@@ -62,6 +63,7 @@ Set `JWT_SECRET` in production. The database is `family.db`; photos are saved in
 | POST | /api/people/:id/merge | Merge this person into `into` |
 | GET | /api/trees/:id/checks | Impossible dates and unconnected people |
 | GET/POST | /api/people/:id/attachments | Photo album, sources, documents |
+| GET | /api/attachments/:id/file | View or download a stored file (same privacy rules as the tree) |
 | DELETE | /api/attachments/:id | Remove one |
 | POST | /api/auth/forgot, /api/auth/reset | Password reset by email |
 | GET/PATCH/DELETE | /api/me, POST /api/me/password | Account settings |
@@ -70,9 +72,20 @@ Set `JWT_SECRET` in production. The database is `family.db`; photos are saved in
 users, trees (root_id, visibility, hide_living), members, audit, people (dob, dod, parent_marriage_id), marriages (a_id, b_id, year).
 A child belongs to a marriage, which is what lets one person have several spouses with separate offspring.
 
+## Configuration
+Set these in your host environment; `.env.example` lists the supported names.
+- `NODE_ENV=production`: disables demo seeding unless `SEED_DEMO=1`, stops printing reset emails to the console, and requires `JWT_SECRET`.
+- `JWT_SECRET`: a long random string. The server exits in production if it is missing.
+- `PORT` (default 3000), `DATA_DIR` (database and photos), and optional `DB` for a custom database path.
+- `AUTH_LIMIT`: failed sign-in, reset, or password-change attempts allowed per IP per 15 minutes (default 20). Successful logins are not counted and do not reset the count; changing the email address does not reset the count. The limiter is in-memory and per process.
+- `SEED_DEMO=1`: seeds the demo account even outside development.
+- `SMTP_URL`, `MAIL_FROM`, `APP_URL`: password-reset email and public links.
+
+The app does not enable Express `trust proxy`, so forwarded headers are not trusted. Behind a reverse proxy, requests appear to come from the proxy's IP; keep that in mind before raising `AUTH_LIMIT`.
+
 ## Email
 Set `SMTP_URL` (for example `smtps://user:pass@smtp.example.com`), `MAIL_FROM` and `APP_URL` (your public address) so password-reset emails are sent. Without `SMTP_URL`, messages are printed to the console outside production, so you can test the flow.
 
 ## Hosting
-`docker build -t family-tree . && docker run -p 3000:3000 -e JWT_SECRET=<long random string> -v familytree:/data family-tree`
-The database and photos live in `DATA_DIR` (`/data` in Docker), so mount a volume there. See `.env.example`.
+`docker build -t family-tree . && docker run -p 3000:3000 -e NODE_ENV=production -e JWT_SECRET=<long random string> -v familytree:/data family-tree`
+The database and photos live in `DATA_DIR` (`/data` in Docker), so mount a volume there. Leave `SEED_DEMO` unset in production unless you deliberately want the demo account. See `.env.example`.

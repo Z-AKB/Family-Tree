@@ -4,8 +4,10 @@ const path = require('path'), os = require('os'), fs = require('fs');
 process.env.DB = path.join(os.tmpdir(), `ft-browser-test-${process.pid}.db`);
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-browser-data-'));
 process.env.AUTH_LIMIT = '1000';
+process.env.JWT_SECRET = 'browser-test-secret';
 const app = require('../server');
 const { chromium } = require('playwright-core');
+const jwt = require('jsonwebtoken');
 
 const candidates = [
   process.env.CHROME_PATH,
@@ -64,6 +66,33 @@ test('person route renders and updates the header title', browserOptions, async 
   await clean(page, errors);
 });
 
+test('photos and files are fetched with the session token and shown from blob URLs', browserOptions, async () => {
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAIUdJ4AAAAABJRU5ErkJggg==', 'base64');
+  const fd = new FormData(); fd.append('photo', new Blob([png], { type: 'image/png' }), 'face.png');
+  assert.equal((await fetch(`${base}/api/people/4/photo`, { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd })).status, 200);
+  const af = new FormData(); af.append('kind', 'photo'); af.append('title', 'Portrait'); af.append('file', new Blob([png], { type: 'image/png' }), 'portrait.png');
+  assert.equal((await fetch(`${base}/api/people/4/attachments`, { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: af })).status, 200);
+
+  const { page, errors } = await open('#/t/1/p/4');
+  await heading('Rosalind Whitmore')(page);
+  await page.waitForFunction(() => /^url\("?blob:/.test(document.querySelector('.hero .av')?.style.backgroundImage || ''));
+  await page.waitForFunction(() => (document.querySelector('.album img')?.src || '').startsWith('blob:'));
+  await page.waitForFunction(() => (document.querySelector('.album a')?.href || '').startsWith('blob:'));
+  await clean(page, errors);
+});
+
+test('the development login page shows the demo hint', browserOptions, async () => {
+  const context = await browser.newContext({ serviceWorkers: 'block' });
+  contexts.push(context);
+  const page = await context.newPage();
+  const errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  await page.goto(base + '/#/');
+  await heading('Welcome back')(page);
+  assert.match(await appText(page), /demo@family\.test/);
+  assert.deepEqual(errors, []);
+});
+
 test('normal navigation between routes stays clean', browserOptions, async () => {
   const { page, errors } = await open('#/');
   await heading('My Family Trees')(page);
@@ -112,4 +141,89 @@ test('a route with no active nav item is tolerated', browserOptions, async () =>
   await heading('Forgot your password?')(page);
   assert.equal(await page.locator('#nav [aria-current="page"]').count(), 0);
   await clean(page, errors);
+});
+
+const mkTree = async (authToken, name, person) => {
+  const r = await fetch(base + '/api/trees', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + authToken },
+    body: JSON.stringify({ name, root: { name: person, gender: 'Other', dob: '1980' } }) });
+  assert.equal(r.status, 200);
+  return (await r.json()).id;
+};
+
+test('logging out clears the token and all private tree content', browserOptions, async () => {
+  const tid = await mkTree(token, 'Private Logout Tree', 'Private Logout Person');
+  const { page, errors } = await open('#/t/' + tid);
+  await heading('Where our family begins')(page);
+  assert.match(await appText(page), /Private Logout Person/);
+  assert.equal(await page.textContent('#title'), 'Private Logout Tree');
+  await page.click('#out');
+  await heading('Welcome back')(page);
+  assert.equal(await page.evaluate(() => localStorage.getItem('tok')), null);
+  assert.doesNotMatch(await appText(page), /Private Logout Person|Where our family begins/);
+  assert.equal(await page.textContent('#title'), 'Family Tree');
+  assert.equal(await page.evaluate(() => location.hash), '#/');
+  assert.deepEqual(errors, []);
+});
+
+test('an expired session is cleared and private content is never shown', browserOptions, async () => {
+  const reg = await fetch(base + '/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'expired@family.test', password: 'password1', name: 'Expired' }) });
+  assert.equal(reg.status, 200);
+  const account = await reg.json();
+  const treeId = await mkTree(account.token, 'Secret Family Tree', 'Secret Person');
+  const expired = jwt.sign({ id: jwt.decode(account.token).id, tv: 0, exp: Math.floor(Date.now() / 1000) - 3600 }, 'browser-test-secret', { algorithm: 'HS256' });
+
+  const context = await browser.newContext({ serviceWorkers: 'block' });
+  contexts.push(context);
+  await context.addInitScript(t => localStorage.setItem('tok', t), expired);
+  const page = await context.newPage();
+  const errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  await page.goto(base + '/#/account');
+  await heading('Welcome back')(page);
+  assert.equal(await page.evaluate(() => localStorage.getItem('tok')), null);
+  assert.doesNotMatch(await appText(page), /Secret Family Tree|Secret Person/);
+  await page.evaluate(id => { location.hash = '#/t/' + id; }, treeId);
+  await delay(300);
+  assert.doesNotMatch(await appText(page), /Secret Family Tree|Secret Person|Where our family begins/);
+  assert.deepEqual(errors, []);
+});
+
+test('switching accounts via login exposes no previous account data', browserOptions, async () => {
+  const reg = await fetch(base + '/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'switcher@family.test', password: 'password1', name: 'Switcher' }) });
+  assert.equal(reg.status, 200);
+  const other = (await reg.json()).token;
+  assert.equal((await fetch(base + '/api/trees', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + other },
+    body: JSON.stringify({ name: 'Other Family Tree', root: { name: 'Other Person', gender: 'Other', dob: '1970' } }) })).status, 200);
+  const privateTid = await mkTree(token, 'Private Switch Tree', 'Private Switch Person');
+
+  const context = await browser.newContext({ serviceWorkers: 'block' });
+  contexts.push(context);
+  const page = await context.newPage();
+  const errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  await page.goto(base + '/#/');
+  await heading('Welcome back')(page);
+  await page.fill('#af input[name=email]', 'demo@family.test');
+  await page.fill('#af input[name=password]', 'demo1234');
+  await page.click('#af button');
+  await heading('My Family Trees')(page);
+  await page.evaluate(id => { location.hash = '#/t/' + id; }, privateTid);
+  await heading('Where our family begins')(page);
+  assert.match(await appText(page), /Private Switch Person/);
+
+  await page.click('#out');
+  await heading('Welcome back')(page);
+  assert.equal(await page.evaluate(() => localStorage.getItem('tok')), null);
+  assert.doesNotMatch(await appText(page), /Private Switch Person|Where our family begins/);
+
+  await page.fill('#af input[name=email]', 'switcher@family.test');
+  await page.fill('#af input[name=password]', 'password1');
+  await page.click('#af button');
+  await heading('My Family Trees')(page);
+  const switched = await appText(page);
+  assert.match(switched, /Other Family Tree/);
+  assert.doesNotMatch(switched, /Private Switch Tree|Private Switch Person/);
+  assert.deepEqual(errors, []);
 });

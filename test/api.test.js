@@ -5,6 +5,7 @@ process.env.DB = path.join(os.tmpdir(), `ft-test-${process.pid}.db`);
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ft-data-'));
 process.env.AUTH_LIMIT = '1000';
 const app = require('../server');
+const Database = require('better-sqlite3');
 let srv, base;
 before(() => new Promise(r => { srv = app.listen(0, () => { base = `http://localhost:${srv.address().port}/api`; r(); }); }));
 after(() => { srv.close(); for (const x of ['', '-wal', '-shm']) try { fs.unlinkSync(process.env.DB + x); } catch {} });
@@ -30,7 +31,7 @@ test('status and age come from the dates; partial and approximate dates work; ba
   assert.equal((await add({ name: 'A', dob: '1960-13' })).status, 400);
   assert.equal((await add({ name: 'B', dob: '2020-02-31' })).status, 400);
   assert.equal((await add({ name: 'C', dob: '1960', dod: '1950' })).status, 400);
-  assert.equal((await add({ name: 'Old Aunt', dob: '1920', dob_q: 'about', dod: '1990-05' })).status, 200);
+  assert.equal((await add({ name: 'Old Aunt', dob: '1946', dob_q: 'about', dod: '2016-05' })).status, 200);
   const p = (await call('/trees/1', { token: t })).body.people.find(x => x.name === 'Old Aunt');
   assert.deepEqual([p.status, p.age, p.dob_q], ['Deceased', 70, 'about']);
 });
@@ -213,9 +214,10 @@ test('password reset by email, changing a password, and deleting an account', as
   assert.equal((await call('/me', { token: n })).status, 401);
 });
 
-test('tree checks flag impossible dates', async () => {
-  const t = await demo();
-  await call('/trees/1/people', { method: 'POST', token: t, body: { name: 'Too Early', dob: '1940', parent_marriage_id: 1 } });
+test('tree checks flag impossible dates in existing records', async () => {
+  const t = await demo(), side = new Database(process.env.DB);
+  try { side.prepare("INSERT INTO people(tree_id,name,dob,parent_marriage_id) VALUES(1,'Too Early','1940',1)").run(); }
+  finally { side.close(); }
   const c = (await call('/trees/1/checks', { token: t })).body;
   assert.ok(c.issues.some(i => /only 6 when Too Early was born/.test(i.text)));
   assert.equal((await call('/trees/1/checks')).status, 401);

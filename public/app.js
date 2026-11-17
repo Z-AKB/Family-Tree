@@ -605,6 +605,16 @@ async function shareView(){
         <div id="rstout" class="stack" style="margin-top:12px"></div>
       </div>
     </section>
+    <section class="panel">
+      <div class="panel-head"><div><div class="panel-title">Rename this tree</div><div class="panel-sub">Change the name shown across your workspace.</div></div></div>
+      <div class="panel-body">
+        <form id="renametree" class="form-inline">
+          <div class="field"><label class="field-label" for="rn-name">New name</label><input id="rn-name" name="name" required value="${esc(t.name)}" maxlength="120"></div>
+          <div class="form-actions"><button class="btn pri" type="submit">${ico('edit')}Rename</button></div>
+          <div class="err" id="erename"></div>
+        </form>
+      </div>
+    </section>
     <section class="panel panel-danger danger-zone">
       <div class="panel-head"><div><div class="panel-title">Delete this tree</div><div class="panel-sub">This removes everyone in the tree and its files. It cannot be undone.</div></div></div>
       <div class="panel-body"><button class="btn del" id="deltree" type="button">${ico('trash')}Delete this tree</button><div class="err" id="edel"></div></div>
@@ -627,6 +637,7 @@ async function shareView(){
   document.querySelectorAll('[data-role]').forEach(s=>s.onchange=async()=>{const vid=viewId;try{await api(`/trees/${id}/members/${s.dataset.role}`,'PATCH',{role:s.value});await done(vid)}catch(x){alert(x.message)}});
   document.querySelectorAll('[data-inv]').forEach(b=>b.onclick=async()=>{const vid=viewId;try{await api(`/trees/${id}/invites/${b.dataset.inv}`,'DELETE');await done(vid)}catch(x){alert(x.message)}});
   const ow=$('#ow');if(ow)ow.onsubmit=async e=>{e.preventDefault();if(!confirm('Make this person the owner? You will become an editor.'))return;const vid=viewId;try{await api(`/trees/${id}/owner`,'POST',{user_id:+new FormData(ow).get('user_id')});await done(vid)}catch(x){setText($('#eow'),x.message)}};
+  $('#renametree').onsubmit=async e=>{e.preventDefault();const err=$('#erename'),vid=viewId;const name=$('#rn-name').value.trim();if(!name){setText(err,'Give your family tree a name.');return}try{await api('/trees/'+id,'PATCH',{name});if(vid!==viewId)return;await load(id,vid);if(vid===viewId){$('#title').textContent=name;shareView()}}catch(x){setText(err,x.message)}};
   $('#deltree').onclick=async()=>{if(!confirm(`Delete “${t.name}” and everyone in it? This cannot be undone.`))return;const vid=viewId;try{await api('/trees/'+id,'DELETE');if(vid!==viewId)return;S=null;clearPrivateUI();location.hash='#/';if((location.hash||'#/')==='#/')route()}catch(x){setText($('#edel'),x.message)}};
   document.querySelectorAll('[data-ged]').forEach(b=>b.onclick=async()=>{const r=await fetch(`/api/trees/${id}/export.ged?hideLiving=${b.dataset.ged}`,{headers:{Authorization:'Bearer '+tok}});
     if(!r.ok)return alert('The export did not work. Please try again.');const a=document.createElement('a');a.href=URL.createObjectURL(await r.blob());a.download=t.name.replace(/\W+/g,'-')+'.ged';a.click()});

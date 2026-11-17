@@ -58,6 +58,37 @@ test('roles: viewers cannot edit, editors can, only the owner can rename', async
   assert.equal((await call('/trees/1', { method: 'PATCH', token: n, body: { name: 'Hacked' } })).status, 403);
 });
 
+test('tree rename: owner can rename, empty/invalid rejected, persists', async () => {
+  const t = await demo();
+  // Successful rename
+  const r1 = await call('/trees/1', { method: 'PATCH', token: t, body: { name: 'Renamed Tree' } });
+  assert.equal(r1.status, 200);
+  // Verify persistence
+  const tree = await call('/trees/1', { token: t });
+  assert.equal(tree.body.tree.name, 'Renamed Tree');
+  // Empty name rejected
+  const r2 = await call('/trees/1', { method: 'PATCH', token: t, body: { name: '   ' } });
+  assert.equal(r2.status, 400);
+  // Name still unchanged after rejection
+  const tree2 = await call('/trees/1', { token: t });
+  assert.equal(tree2.body.tree.name, 'Renamed Tree');
+  // Restore original name
+  await call('/trees/1', { method: 'PATCH', token: t, body: { name: 'The Whitmore Family' } });
+});
+
+test('tree rename: unauthorised user cannot rename', async () => {
+  const reg = await call('/auth/register', { method: 'POST', body: { email: 'rename-test@family.test', password: 'password1', name: 'Rename Tester' } });
+  const n = reg.body.token;
+  // Viewer cannot rename
+  const t = await demo();
+  await call('/trees/1/members', { method: 'POST', token: t, body: { email: 'rename-test@family.test', role: 'viewer' } });
+  const r = await call('/trees/1', { method: 'PATCH', token: n, body: { name: 'Hacked' } });
+  assert.equal(r.status, 403);
+  // Name unchanged
+  const tree = await call('/trees/1', { token: t });
+  assert.notEqual(tree.body.tree.name, 'Hacked');
+});
+
 test('people with children and the first person cannot be removed', async () => {
   const t = await demo();
   assert.equal((await call('/people/2', { method: 'DELETE', token: t })).status, 409);
